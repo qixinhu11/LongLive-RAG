@@ -1,0 +1,36 @@
+# ──────────────────────────────────────────────────────────────
+# AutoEncoder + Window Temporal Delta Loss
+# Single-GPU training — launch with `bash train_ae_delta.sh`.
+# ──────────────────────────────────────────────────────────────
+
+# ── Data ──
+data_dir: datasets          # output of generate_latent.sh (flat directory of latent_XXXXXX.pt)
+num_workers: 8
+seq_len: 8                  # continuous latent blocks per training chunk
+
+# ── Model ──
+in_channels: 16
+spatial_h: 60
+spatial_w: 104
+latent_dim: 1024            # retrieval embedding dimension
+hidden_dims: [64, 128, 256] # encoder/decoder channel dimensions
+
+# ── Training ──
+batch_size: 128             # single-GPU batch
+lr: 3.0e-4                  # AdamW learning rate
+weight_decay: 1.0e-4
+epochs: 400
+grad_clip: 1.0
+use_amp: true               # mixed-precision
+
+# ── Loss weights ──
+delta_weight: 1.0           # λ_Δ — Window Temporal Delta Loss weight
+delta_margin: 0.85          # m — cosine-similarity margin
+delta_window: 3             # w — local window for temporal delta pairs
+smooth_weight: 1.0          # λ_smooth — trajectory-smoothing loss weight
+
+# ── Logging ──
+wandb_run_name: ae_delta
+
+# ── GPU ──
+gpu: 0

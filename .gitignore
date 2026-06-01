@@ -1,0 +1,76 @@
+# Byte-compiled / cached
+__pycache__/
+*.py[codz]
+*$py.class
+*.so
+
+# Environments
+.env
+.envrc
+.venv
+env/
+venv/
+ENV/
+
+# Type-checker / linter caches
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints
+
+# Translations
+*.mo
+*.pot
+
+# Local agent / IDE session state (kept local, not published)
+.claude/
+
+# Editors
+#.idea/
+#.vscode/
+
+# ── Project-specific ────────────────────────────────────────────────────────
+wan_models                  # base WAN VAE (downloaded)
+checkpoints                 # AR backbones, AE ckpt, prompt .txt files
+ae_runs                     # AE training output
+
+videos                      # inference video output
+datasets                    # AE training latent corpus (generated)
+toydatasets                 # tiny example latent set
+
+# Model weights / checkpoints
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.onnx
+
+# Media outputs
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+# ...but keep the README demo clips
+!assets/demo/*.mp4
+
+# Archives
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.rar
+
+ae_runs/
+checkpoints/
+wan_models/
+videos/
+
+# Hugging Face model card (published to HF repo only) and CLI cache
+hf_model_card.md
+.cache/

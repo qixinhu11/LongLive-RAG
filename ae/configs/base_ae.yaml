@@ -1,0 +1,32 @@
+# ──────────────────────────────────────────────────────────────
+# Base AutoEncoder — reconstruction only, no temporal losses
+# ──────────────────────────────────────────────────────────────
+# Usage:
+#   python -m ae.train --config ae/configs/base_ae.yaml
+#   python -m ae.train --config ae/configs/base_ae.yaml --data_dir datasets
+
+# ── Data ──
+data_dir: datasets
+num_workers: 8
+seq_len: 8
+
+# ── Model ──
+in_channels: 16
+spatial_h: 60
+spatial_w: 104
+latent_dim: 1024
+hidden_dims: [64, 128, 256]
+
+# ── Training ──
+batch_size: 128
+lr: 3e-4
+weight_decay: 1e-4
+epochs: 400
+use_amp: true
+
+
+# ── Temporal Losses (disabled) ──
+delta_weight: 0.0
+
+# ── GPU ──
+gpu: 0

@@ -1,0 +1,25 @@
+# Causal-Forcing baseline (no retrieval, sliding-window only).
+denoising_step_list: [1000, 750, 500, 250]
+warp_denoising_step: true
+num_frame_per_block: 3
+model_name: Wan2.1-T2V-1.3B
+
+model_kwargs:
+  local_attn_size: 12
+  timestep_shift: 5.0
+  sink_size: 1
+
+generator_ckpt: checkpoints/causal_forcing.pt
+
+# inference
+data_path: checkpoints/moviegenbench_128_refined.txt
+output_folder: videos/causal_forcing/native
+inference_iter: -1
+skip_existing: true
+num_output_frames: 120
+use_ema: false
+seed: 0
+num_samples: 1
+save_with_index: true
+global_sink: true
+context_noise: 0
