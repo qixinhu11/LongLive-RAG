@@ -6,7 +6,8 @@
 [![Code](https://img.shields.io/badge/GitHub-Code-blue)](https://github.com/qixinhu11/LongLive-RAG)
 [![Demo](https://img.shields.io/badge/Demo-Page-brightgreen)](https://longlive-rag.github.io/)
 [![DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/qixinhu11/LongLive-RAG)
-[![HuggingFace](https://img.shields.io/badge/🤗-HuggingFace-yellow)](https://huggingface.co/qixinhu11/LongLive-RAG)
+[![Model Card](https://img.shields.io/badge/🤗-Model_Card-yellow)](https://huggingface.co/qixinhu11/LongLive-RAG)
+[![HF Paper](https://img.shields.io/badge/🤗-Paper-yellow)](https://huggingface.co/papers/2606.02553)
 
 [Qixin Hu](https://qixinhu11.github.io/) · [Shuai Yang](https://andysonys.github.io/) · [Wei Huang](https://aaron-weihuang.com/) · [Song Han](https://hanlab.mit.edu/songhan) · [Yukang Chen](https://yukangchen.com/)
 
