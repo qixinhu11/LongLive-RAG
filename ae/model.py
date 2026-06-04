@@ -254,9 +254,9 @@ class LatentAE(nn.Module):
 
 class TemporalDeltaLoss(nn.Module):
     """
-    Penalizes redundancy across time by pushing visually identical consecutive
-    frames (or sink frames) to differ in embedding space, forcing the AE
-    to naturally encode the delta / motion semantics.
+    Penalizes redundancy across time by pushing temporally adjacent frames
+    (within a window) to differ in embedding space, forcing the AE to encode
+    delta / motion semantics rather than redundant static similarity.
     """
     def __init__(self, margin: float = 0.85, weight: float = 1.0):
         super().__init__()

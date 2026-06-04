@@ -39,14 +39,14 @@ class AEConfig:
     epochs: int = 400
 
 
-    # ── Window Temporal Delta + Smooth Loss (Table 4) ─────────────────────────
+    # ── Window Temporal Delta + Smooth Loss ──────────────────────────────────
     delta_margin: float = 0.85      # m — cosine-similarity margin
     delta_weight: float = 1.0       # λ_Δ — Window Temporal Delta Loss weight
     delta_window: int = 3           # w — local window for temporal delta pairs
     smooth_weight: float = 1.0      # λ_smooth — trajectory-smoothing loss weight
 
     grad_clip: float = 1.0          # max gradient norm (0 = no clipping)
-    use_amp: bool = True            # automatic mixed precision (Table 4)
+    use_amp: bool = True            # automatic mixed precision
 
     # ── Logging / Checkpointing ───────────────────────────────────────────────
     log_dir: str = "ae_runs"
