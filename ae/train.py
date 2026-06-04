@@ -7,6 +7,14 @@ or directly:
     python -m ae.train --config ae/configs/ae_delta.yaml
 
 Config loading order:  dataclass defaults → YAML file → CLI flags
+
+Structure:
+    load_config / build_argparser   – config resolution
+    build_dataloaders               – dataset + train/val split
+    compute_losses                  – forward pass + composite loss (shared by train & val)
+    train_one_epoch / validate      – one pass over a loader
+    save_checkpoint                 – uniform checkpoint writer
+    main                            – orchestration
 """
 
 import argparse
@@ -55,8 +63,7 @@ def build_argparser() -> argparse.ArgumentParser:
 
 def load_config() -> AEConfig:
     """Load config with 3-tier override: defaults → YAML → CLI."""
-    parser = build_argparser()
-    args = parser.parse_args()
+    args = build_argparser().parse_args()
 
     if args.config:
         cfg = AEConfig.from_yaml(args.config)
@@ -73,6 +80,159 @@ def load_config() -> AEConfig:
 
 def count_parameters(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Data
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_dataloaders(cfg: AEConfig):
+    """Build the train/val DataLoaders from a single latent-frame dataset."""
+    print(f"\nLoading dataset from {cfg.data_dir} ...")
+    full_dataset = LatentFrameDataset(cfg.data_dir, data_percentage=cfg.data_percentage, seq_len=cfg.seq_len)
+
+    n_total = len(full_dataset)
+    n_val = max(1, int(n_total * cfg.val_split))
+    n_train = n_total - n_val
+    train_ds, val_ds = random_split(
+        full_dataset, [n_train, n_val],
+        generator=torch.Generator().manual_seed(cfg.seed),
+    )
+    print(f"  Total files : {n_total}")
+    print(f"  Train / Val : {n_train} / {n_val}")
+    print(f"  Batch size  : {cfg.batch_size}")
+
+    train_loader = DataLoader(
+        train_ds, batch_size=cfg.batch_size, shuffle=True,
+        num_workers=cfg.num_workers, pin_memory=True, drop_last=True,
+    )
+    val_loader = DataLoader(
+        val_ds, batch_size=cfg.batch_size, shuffle=False,
+        num_workers=cfg.num_workers, pin_memory=True,
+    )
+    return train_loader, val_loader
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Loss (shared by train and validation)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compute_losses(model, chunk, cfg: AEConfig, temporal_loss_fn, device):
+    """Forward pass + composite loss for one batch of frame chunks.
+
+    Args:
+        chunk: [B, S, C, H, W] continuous frame chunks.
+    Returns:
+        (total, recon, delta, smooth) loss tensors.
+    """
+    B, S, C, H, W = chunk.shape
+    x_flat = chunk.view(B * S, C, H, W)
+
+    recon, embed = model(x_flat)
+    recon_loss = LatentAE.loss_function(recon, x_flat)
+
+    embed_seq = embed.view(B, S, -1)                       # [B, S, D]
+    embed_dim = embed_seq.shape[-1]
+
+    # ── Window Temporal Delta loss: average hinge over temporal offsets 1..w ──
+    delta_loss = torch.zeros((), device=device)
+    max_window = min(S - 1, cfg.delta_window)
+    for k in range(1, max_window + 1):
+        cur = embed_seq[:, k:, :].reshape(-1, embed_dim)
+        prev = embed_seq[:, :-k, :].reshape(-1, embed_dim)
+        delta_loss = delta_loss + temporal_loss_fn(cur, prev)
+    if max_window > 0:
+        delta_loss = delta_loss / max_window
+
+    # ── Trajectory-smoothing: penalise embedding acceleration ──
+    smooth_loss = torch.zeros((), device=device)
+    if S >= 3 and cfg.smooth_weight > 0:
+        accel = embed_seq[:, 2:, :] - 2 * embed_seq[:, 1:-1, :] + embed_seq[:, :-2, :]
+        smooth_loss = torch.sqrt(accel.float().pow(2).sum(dim=-1) + 1e-8).mean() * cfg.smooth_weight
+
+    total = recon_loss + delta_loss + smooth_loss
+    return total, recon_loss, delta_loss, smooth_loss
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Train / Validate
+# ─────────────────────────────────────────────────────────────────────────────
+
+def train_one_epoch(model, loader, optimizer, scaler, temporal_loss_fn, cfg, device, epoch, use_wandb):
+    """Run one training epoch; returns the epoch-averaged loss components."""
+    model.train()
+    amp_enabled = cfg.use_amp and device.type == "cuda"
+    sums = {"recon": 0.0, "delta": 0.0, "smooth": 0.0}
+    n_batches = 0
+
+    for step, chunk in enumerate(loader):
+        chunk = chunk.to(device, non_blocking=True)        # [B, S, C, H, W]
+
+        with torch.amp.autocast("cuda", enabled=amp_enabled):
+            loss, recon, delta, smooth = compute_losses(model, chunk, cfg, temporal_loss_fn, device)
+
+        optimizer.zero_grad(set_to_none=True)
+        scaler.scale(loss).backward()
+        if cfg.grad_clip > 0:
+            scaler.unscale_(optimizer)
+            nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+        scaler.step(optimizer)
+        scaler.update()
+
+        sums["recon"] += recon.item()
+        sums["delta"] += delta.item()
+        sums["smooth"] += smooth.item()
+        n_batches += 1
+
+        if (step + 1) % cfg.log_every == 0:
+            print(f"  [E{epoch:03d} S{step+1:04d}]  "
+                  f"loss={loss.item():.6f}  recon={recon.item():.6f}  "
+                  f"dt={delta.item():.4f}  sm={smooth.item():.4f}")
+            if use_wandb:
+                wandb.log({
+                    "train/loss": loss.item(),
+                    "train/recon_loss": recon.item(),
+                    "train/delta_seq": delta.item(),
+                    "train/smooth": smooth.item(),
+                }, step=epoch * len(loader) + step)
+
+    return {k: v / max(n_batches, 1) for k, v in sums.items()}
+
+
+@torch.no_grad()
+def validate(model, loader, temporal_loss_fn, cfg, device):
+    """Run one validation pass; returns the averaged loss components."""
+    model.eval()
+    amp_enabled = cfg.use_amp and device.type == "cuda"
+    sums = {"recon": 0.0, "delta": 0.0, "smooth": 0.0}
+    n_batches = 0
+
+    for chunk in loader:
+        chunk = chunk.to(device, non_blocking=True)
+        with torch.amp.autocast("cuda", enabled=amp_enabled):
+            _, recon, delta, smooth = compute_losses(model, chunk, cfg, temporal_loss_fn, device)
+        sums["recon"] += recon.item()
+        sums["delta"] += delta.item()
+        sums["smooth"] += smooth.item()
+        n_batches += 1
+
+    return {k: v / max(n_batches, 1) for k, v in sums.items()}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Checkpointing
+# ─────────────────────────────────────────────────────────────────────────────
+
+def save_checkpoint(path, model, optimizer, scaler, cfg, epoch, **extra):
+    """Write a checkpoint with model/optimizer/scaler state plus optional extras."""
+    torch.save({
+        "epoch": epoch,
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scaler": scaler.state_dict(),
+        "config": vars(cfg),
+        **extra,
+    }, path)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -116,38 +276,19 @@ def main():
         )
         print(f"Wandb run: {wandb.run.name}")
 
-    # ── Dataset & DataLoaders ─────────────────────────────────────────────────
-    print(f"\nLoading dataset from {cfg.data_dir} ...")
-    full_dataset = LatentFrameDataset(cfg.data_dir, data_percentage=cfg.data_percentage, seq_len=cfg.seq_len)
-    n_total = len(full_dataset)
-    n_val = max(1, int(n_total * cfg.val_split))
-    n_train = n_total - n_val
-    train_ds, val_ds = random_split(
-        full_dataset, [n_train, n_val],
-        generator=torch.Generator().manual_seed(cfg.seed),
-    )
-    print(f"  Total files : {n_total}")
-    print(f"  Train / Val : {n_train} / {n_val}")
-    print(f"  Batch size  : {cfg.batch_size}")
+    # ── Data ──────────────────────────────────────────────────────────────────
+    train_loader, val_loader = build_dataloaders(cfg)
+    steps_per_epoch = len(train_loader)
 
-    train_loader = DataLoader(
-        train_ds, batch_size=cfg.batch_size, shuffle=True,
-        num_workers=cfg.num_workers, pin_memory=True, drop_last=True,
-    )
-    val_loader = DataLoader(
-        val_ds, batch_size=cfg.batch_size, shuffle=False,
-        num_workers=cfg.num_workers, pin_memory=True,
-    )
-
-    # ── Model ─────────────────────────────────────────────────────────────────
+    # ── Model / optimizer ─────────────────────────────────────────────────────
     model = LatentAE(cfg).to(device)
     print(f"\nModel parameters: {count_parameters(model):,}")
     print(f"Encoder feat shape: {model.encoder._feat_shape}")
     print(f"Latent dim: {cfg.latent_dim}\n")
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr,
-                                  weight_decay=cfg.weight_decay)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     scaler = torch.amp.GradScaler("cuda", enabled=cfg.use_amp and device.type == "cuda")
+    temporal_loss_fn = TemporalDeltaLoss(margin=cfg.delta_margin, weight=cfg.delta_weight)
 
     # ── Resume ────────────────────────────────────────────────────────────────
     start_epoch = 0
@@ -159,172 +300,47 @@ def main():
         start_epoch = ckpt["epoch"] + 1
         print(f"Resumed from {cfg.resume}  (epoch {start_epoch})")
 
-    # ── Loss setup ────────────────────────────────────────────────────────────
-    temporal_loss_fn = TemporalDeltaLoss(margin=cfg.delta_margin, weight=cfg.delta_weight)
-    best_val_loss = float('inf')
-
     # ── Training loop ─────────────────────────────────────────────────────────
+    best_val_loss = float('inf')
     for epoch in range(start_epoch, cfg.epochs):
-        model.train()
         t0 = time.time()
-        epoch_recon = 0.0
-        epoch_delta_seq = 0.0
-        epoch_smooth = 0.0
-        n_batches = 0
+        tr = train_one_epoch(model, train_loader, optimizer, scaler,
+                             temporal_loss_fn, cfg, device, epoch, use_wandb)
+        val = validate(model, val_loader, temporal_loss_fn, cfg, device)
+        elapsed = time.time() - t0
 
-        for step, chunk in enumerate(train_loader):
-            chunk = chunk.to(device, non_blocking=True)  # [B, S, C, H, W]
-            B, S, C, H_, W_ = chunk.shape
-            x_flat = chunk.view(B * S, C, H_, W_)
-
-            with torch.amp.autocast("cuda", enabled=cfg.use_amp and device.type == "cuda"):
-                recon, embed = model(x_flat)
-                recon_loss = LatentAE.loss_function(recon, x_flat)
-
-                # ── Window Temporal Delta Loss ──
-                embed_seq = embed.view(B, S, -1)     # [B, S, D]
-
-                loss_delta_seq = torch.tensor(0.0, device=device)
-                max_window = min(S - 1, cfg.delta_window)
-                for k in range(1, max_window + 1):
-                    embed_t_k = embed_seq[:, k:, :]
-                    embed_prev_k = embed_seq[:, :-k, :]
-                    lt_k = temporal_loss_fn(
-                        embed_t_k.reshape(-1, embed_t_k.shape[-1]),
-                        embed_prev_k.reshape(-1, embed_prev_k.shape[-1])
-                    )
-                    loss_delta_seq += lt_k
-                if max_window > 0:
-                    loss_delta_seq /= max_window
-
-                # ── Trajectory-smoothing (acceleration) loss ──
-                loss_smooth = torch.tensor(0.0, device=device)
-                if S >= 3 and cfg.smooth_weight > 0:
-                    embed_t2 = embed_seq[:, 2:, :]
-                    embed_t1 = embed_seq[:, 1:-1, :]
-                    embed_t0 = embed_seq[:, :-2, :]
-                    accel = embed_t2 - 2 * embed_t1 + embed_t0
-                    loss_smooth = torch.sqrt(accel.float().pow(2).sum(dim=-1) + 1e-8).mean() * cfg.smooth_weight
-
-                loss = recon_loss + loss_delta_seq + loss_smooth
-
-            optimizer.zero_grad(set_to_none=True)
-            scaler.scale(loss).backward()
-            if cfg.grad_clip > 0:
-                scaler.unscale_(optimizer)
-                nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
-            scaler.step(optimizer)
-            scaler.update()
-
-            epoch_recon += recon_loss.item()
-            epoch_delta_seq += loss_delta_seq.item()
-            epoch_smooth += loss_smooth.item()
-            n_batches += 1
-
-            if (step + 1) % cfg.log_every == 0:
-                print(f"  [E{epoch:03d} S{step+1:04d}]  "
-                      f"loss={loss.item():.6f}  "
-                      f"recon={recon_loss.item():.6f}  "
-                      f"dt={loss_delta_seq.item():.4f}  "
-                      f"sm={loss_smooth.item():.4f}")
-                if use_wandb:
-                    global_step = epoch * len(train_loader) + step
-                    wandb.log({
-                        "train/loss": loss.item(),
-                        "train/recon_loss": recon_loss.item(),
-                        "train/delta_seq": loss_delta_seq.item(),
-                        "train/smooth": loss_smooth.item(),
-                    }, step=global_step)
-
-        avg_recon = epoch_recon / max(n_batches, 1)
-        avg_dt    = epoch_delta_seq / max(n_batches, 1)
-        avg_sm    = epoch_smooth / max(n_batches, 1)
-        elapsed   = time.time() - t0
-
-        # ── Validation ────────────────────────────────────────────────────────
-        model.eval()
-        val_recon = 0.0
-        val_dt    = 0.0
-        val_sm    = 0.0
-        val_n     = 0
-        with torch.no_grad():
-            for chunk in val_loader:
-                chunk = chunk.to(device, non_blocking=True)
-                B, S, C, H_, W_ = chunk.shape
-                x_flat = chunk.view(B * S, C, H_, W_)
-
-                with torch.amp.autocast("cuda", enabled=cfg.use_amp and device.type == "cuda"):
-                    recon, embed = model(x_flat)
-                    rl = LatentAE.loss_function(recon, x_flat)
-
-                    embed_seq = embed.view(B, S, -1)
-                    max_window = min(S - 1, cfg.delta_window)
-                    lt = torch.tensor(0.0, device=device)
-                    for k in range(1, max_window + 1):
-                        embed_t_k = embed_seq[:, k:, :]
-                        embed_prev_k = embed_seq[:, :-k, :]
-                        lt += temporal_loss_fn(embed_t_k.reshape(-1, embed_t_k.shape[-1]),
-                                               embed_prev_k.reshape(-1, embed_prev_k.shape[-1]))
-                    if max_window > 0:
-                        lt /= max_window
-
-                    l_sm = torch.tensor(0.0, device=device)
-                    if S >= 3 and cfg.smooth_weight > 0:
-                        accel = embed_seq[:, 2:, :] - 2 * embed_seq[:, 1:-1, :] + embed_seq[:, :-2, :]
-                        l_sm = torch.sqrt(accel.float().pow(2).sum(dim=-1) + 1e-8).mean() * cfg.smooth_weight
-
-                val_recon += rl.item()
-                val_dt    += lt.item()
-                val_sm    += l_sm.item()
-                val_n     += 1
-
-        val_recon /= max(val_n, 1)
-        val_dt    /= max(val_n, 1)
-        val_sm    /= max(val_n, 1)
-        val_total = val_recon + val_dt + val_sm
+        tr_total = tr["recon"] + tr["delta"] + tr["smooth"]
+        val_total = val["recon"] + val["delta"] + val["smooth"]
 
         print(f"Epoch {epoch:03d}  "
-              f"tr_rec={avg_recon:.6f} tr_dt={avg_dt:.4f} tr_sm={avg_sm:.4f} | "
-              f"val_rec={val_recon:.6f} val_dt={val_dt:.4f} val_sm={val_sm:.4f}  "
+              f"tr_rec={tr['recon']:.6f} tr_dt={tr['delta']:.4f} tr_sm={tr['smooth']:.4f} | "
+              f"val_rec={val['recon']:.6f} val_dt={val['delta']:.4f} val_sm={val['smooth']:.4f}  "
               f"time={elapsed:.1f}s")
 
         if use_wandb:
             wandb.log({
                 "epoch": epoch,
-                "epoch/train_recon": avg_recon,
-                "epoch/train_delta_seq": avg_dt,
-                "epoch/train_smooth": avg_sm,
-                "epoch/train_total": avg_recon + avg_dt + avg_sm,
-                "epoch/val_recon": val_recon,
-                "epoch/val_delta_seq": val_dt,
-                "epoch/val_smooth": val_sm,
+                "epoch/train_recon": tr["recon"],
+                "epoch/train_delta_seq": tr["delta"],
+                "epoch/train_smooth": tr["smooth"],
+                "epoch/train_total": tr_total,
+                "epoch/val_recon": val["recon"],
+                "epoch/val_delta_seq": val["delta"],
+                "epoch/val_smooth": val["smooth"],
                 "epoch/val_total": val_total,
                 "epoch/time_s": elapsed,
-            }, step=(epoch + 1) * len(train_loader))
+            }, step=(epoch + 1) * steps_per_epoch)
 
         # ── Checkpoint ────────────────────────────────────────────────────────
         if val_total < best_val_loss:
             best_val_loss = val_total
             ckpt_path = os.path.join(experiment_dir, "ae_epoch_best.pt")
-            torch.save({
-                "epoch": epoch,
-                "model": model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "scaler": scaler.state_dict(),
-                "config": vars(cfg),
-                "val_loss": best_val_loss,
-            }, ckpt_path)
+            save_checkpoint(ckpt_path, model, optimizer, scaler, cfg, epoch, val_loss=best_val_loss)
             print(f"  → Saved NEW BEST checkpoint: {ckpt_path} (val_loss: {best_val_loss:.6f})")
 
         if (epoch + 1) % cfg.save_every == 0 or epoch == cfg.epochs - 1:
             ckpt_path = os.path.join(experiment_dir, f"ae_epoch{epoch:03d}.pt")
-            torch.save({
-                "epoch": epoch,
-                "model": model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "scaler": scaler.state_dict(),
-                "config": vars(cfg),
-            }, ckpt_path)
+            save_checkpoint(ckpt_path, model, optimizer, scaler, cfg, epoch)
             print(f"  → Saved periodic checkpoint: {ckpt_path}")
 
     if use_wandb:
