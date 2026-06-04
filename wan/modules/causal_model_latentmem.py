@@ -793,20 +793,6 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         block_mask = create_block_mask(attention_mask, B=None, H=None, Q_LEN=total_length + padded_length,
                                        KV_LEN=total_length + padded_length, _compile=False, device=device)
 
-        import torch.distributed as dist
-        if (not dist.is_initialized() or dist.get_rank() == 0) and DEBUG:
-            pass
-
-        # import imageio
-        # import numpy as np
-        # from torch.nn.attention.flex_attention import create_mask
-
-        # mask = create_mask(attention_mask, B=None, H=None, Q_LEN=total_length +
-        #                    padded_length, KV_LEN=total_length + padded_length, device=device)
-        # import cv2
-        # mask = cv2.resize(mask[0, 0].cpu().float().numpy(), (1024, 1024))
-        # imageio.imwrite("mask_%d.jpg" % (0), np.uint8(255. * mask))
-
         return block_mask
 
     @staticmethod
@@ -819,12 +805,6 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         [1 latent frame] [1 latent frame] ... [1 latent frame]
         We use flexattention to construct the attention mask
         """
-        # # debug
-        # DEBUG = False
-        # if DEBUG:
-        #     num_frames = 9
-        #     frame_seqlen = 256
-
         total_length = num_frames * frame_seqlen * 2
 
         # we do right padding to get to a multiple of 128
@@ -939,19 +919,6 @@ class CausalWanModel(ModelMixin, ConfigMixin):
 
         block_mask = create_block_mask(attention_mask, B=None, H=None, Q_LEN=total_length + padded_length,
                                        KV_LEN=total_length + padded_length, _compile=False, device=device)
-
-        if not dist.is_initialized() or dist.get_rank() == 0:
-            pass
-
-        # import imageio
-        # import numpy as np
-        # from torch.nn.attention.flex_attention import create_mask
-
-        # mask = create_mask(attention_mask, B=None, H=None, Q_LEN=total_length +
-        #                    padded_length, KV_LEN=total_length + padded_length, device=device)
-        # import cv2
-        # mask = cv2.resize(mask[0, 0].cpu().float().numpy(), (1024, 1024))
-        # imageio.imwrite("mask_%d.jpg" % (0), np.uint8(255. * mask))
 
         return block_mask
 
@@ -1068,11 +1035,9 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         if y is not None:
             x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
         
-        # print(f"x.device: {x[0].device}, t.device: {t.device}, context.device: {context.device}, seq_len: {seq_len}")
 
         # embeddings
         x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
-        # print("patch embedding done")
         grid_sizes = torch.stack(
             [torch.tensor(u.shape[2:], dtype=torch.long) for u in x])
         x = [u.flatten(2).transpose(1, 2) for u in x]
@@ -1093,7 +1058,6 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         e0 = self.time_projection(e).unflatten(
             1, (6, self.dim)).unflatten(dim=0, sizes=t.shape)
         # assert e.dtype == torch.float32 and e0.dtype == torch.float32
-        # print("time embedding done")
         # context
         context_lens = None
         context = self.text_embedding(
@@ -1102,7 +1066,6 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                     [u, u.new_zeros(self.text_len - u.size(0), u.size(1))])
                 for u in context
             ]))
-        # print("text embedding done")
         if clip_fea is not None:
             context_clip = self.img_emb(clip_fea)  # bs x 257 x dim
             context = torch.concat([context_clip, context], dim=1)
@@ -1119,7 +1082,6 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             sink_recache_after_switch=sink_recache_after_switch,
             memory_indices=memory_indices
         )
-        # print("kwargs done")
         def create_custom_forward(module):
             def custom_forward(*inputs, **kwargs):
                 return module(*inputs, **kwargs)
@@ -1128,7 +1090,6 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         cache_update_info = None
         cache_update_infos = []  # Collect cache update info for all blocks
         for block_index, block in enumerate(self.blocks):
-            # print(f"block_index: {block_index}")
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 kwargs.update(
                     {
@@ -1137,7 +1098,6 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                         "cache_start": cache_start
                     }
                 )
-                # print(f"forward checkpointing")
                 result = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(block),
                     x, **kwargs,
@@ -1160,7 +1120,6 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                         "cache_start": cache_start
                     }
                 )
-                # print(f"forward no checkpointing")
                 result = block(x, **kwargs)
                 # Handle the result
                 if kv_cache is not None and isinstance(result, tuple):

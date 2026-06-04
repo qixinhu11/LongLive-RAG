@@ -113,7 +113,7 @@ if getattr(config, "adapter", None) and configure_lora_for_model is not None:
     if local_rank == 0:
         print(f"LoRA enabled with config: {config.adapter}")
         print("Applying LoRA to generator (inference)...")
-    # 在加载基础权重后，对 generator 的 transformer 模型应用 LoRA 包装
+    # Wrap the generator's transformer with LoRA after the base weights are loaded
     pipeline.generator.model = configure_lora_for_model(
         pipeline.generator.model,
         model_name="generator",
@@ -121,13 +121,13 @@ if getattr(config, "adapter", None) and configure_lora_for_model is not None:
         is_main_process=(local_rank == 0),
     )
 
-    # 加载 LoRA 权重（如果提供了 lora_ckpt）
+    # Load LoRA weights if a lora_ckpt is provided
     lora_ckpt_path = getattr(config, "lora_ckpt", None)
     if lora_ckpt_path:
         if local_rank == 0:
             print(f"Loading LoRA checkpoint from {lora_ckpt_path}")
         lora_checkpoint = torch.load(lora_ckpt_path, map_location="cpu")
-        # 兼容包含 `generator_lora` 键或直接是 LoRA state dict 两种格式
+        # Support both a dict containing a `generator_lora` key and a raw LoRA state dict
         if isinstance(lora_checkpoint, dict) and "generator_lora" in lora_checkpoint:
             peft.set_peft_model_state_dict(pipeline.generator.model, lora_checkpoint["generator_lora"])  # type: ignore
         else:
