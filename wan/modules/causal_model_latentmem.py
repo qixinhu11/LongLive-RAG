@@ -29,7 +29,7 @@ flex_attention = torch.compile(
     flex_attention, dynamic=False, mode="max-autotune-no-cudagraphs")
 
 
-def block_relativistic_rope(x, grid_sizes, freqs, start_frame=0, relative_frame_indices=None):
+def causal_online_rope(x, grid_sizes, freqs, start_frame=0, relative_frame_indices=None):
     """
     Apply causal RoPE (Rotary Position Embedding) to input tensor.
     
@@ -39,7 +39,7 @@ def block_relativistic_rope(x, grid_sizes, freqs, start_frame=0, relative_frame_
         freqs: RoPE frequencies
         start_frame: Starting frame index for sequential RoPE (default: 0)
         relative_frame_indices: Optional tensor of shape [F] specifying explicit frame indices
-                               for Block-Relativistic RoPE. If provided, overrides start_frame.
+                               for causal online RoPE. If provided, overrides start_frame.
     """
     n, c = x.size(2), x.size(3) // 2
 
@@ -56,7 +56,7 @@ def block_relativistic_rope(x, grid_sizes, freqs, start_frame=0, relative_frame_
         x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float64).reshape(
             seq_len, n, -1, 2))
         
-        # Use relative_frame_indices if provided (Block-Relativistic RoPE),
+        # Use relative_frame_indices if provided (causal online RoPE),
         # otherwise use sequential indices starting from start_frame
         if relative_frame_indices is not None:
             # relative_frame_indices should be a tensor of shape [f] with explicit frame indices
@@ -242,7 +242,7 @@ class CausalWanSelfAttention(nn.Module):
             
             if self.local_attn_size != -1 and (current_end > kv_cache["global_end_index"].item()) and (
                     num_new_tokens + kv_cache["local_end_index"].item() > kv_cache_size):
-                # === Block-Relativistic RoPE ===
+                # === causal online RoPE ===
                 # Calculate the number of new tokens added in this step
                 # Shift existing cache content left to discard oldest tokens
                 num_evicted_tokens = num_new_tokens + kv_cache["local_end_index"].item() - kv_cache_size
@@ -288,7 +288,7 @@ class CausalWanSelfAttention(nn.Module):
                     temp_k[:, write_start_index:local_end_index] = k[:, roped_offset:roped_offset + write_len]
                     temp_v[:, write_start_index:local_end_index] = v[:, roped_offset:roped_offset + write_len]
 
-                # === Block-Relativistic RoPE Application ===
+                # === causal online RoPE Application ===
                 # For query: use relative indices based on position in window
                 # Query frames are at the end of the window: [local_attn_size - num_new_frames, ..., local_attn_size - 1]
                 query_relative_indices = torch.arange(
@@ -296,7 +296,7 @@ class CausalWanSelfAttention(nn.Module):
                     self.local_attn_size, 
                     device=q.device
                 )
-                roped_query = block_relativistic_rope(
+                roped_query = causal_online_rope(
                     q, grid_sizes, freqs, relative_frame_indices=query_relative_indices
                 ).type_as(v)
                 
@@ -311,7 +311,7 @@ class CausalWanSelfAttention(nn.Module):
                 cache_grid_sizes[0, 0] = num_cache_frames
                 
                 # Apply RoPE to cached K using relative indices
-                roped_temp_k = block_relativistic_rope(
+                roped_temp_k = causal_online_rope(
                     temp_k[:, :local_end_index].view(b, num_cache_frames, frame_seqlen, n, d).flatten(1, 2),
                     cache_grid_sizes, freqs, relative_frame_indices=cache_relative_indices
                 ).type_as(v)
@@ -364,7 +364,7 @@ class CausalWanSelfAttention(nn.Module):
                     current_frame_in_window + num_new_frames,
                     device=q.device
                 )
-                roped_query = block_relativistic_rope(
+                roped_query = causal_online_rope(
                     q, grid_sizes, freqs, relative_frame_indices=query_relative_indices
                 ).type_as(v)
                 
@@ -375,7 +375,7 @@ class CausalWanSelfAttention(nn.Module):
                 cache_grid_sizes = grid_sizes.clone()
                 cache_grid_sizes[0, 0] = num_cache_frames
                 
-                roped_temp_k = block_relativistic_rope(
+                roped_temp_k = causal_online_rope(
                     temp_k[:, :local_end_index].view(b, num_cache_frames, frame_seqlen, n, d).flatten(1, 2),
                     cache_grid_sizes, freqs, relative_frame_indices=cache_relative_indices
                 ).type_as(v)
@@ -428,7 +428,7 @@ class CausalWanSelfAttention(nn.Module):
                         mem_grid_sizes = grid_sizes.clone()
                         mem_grid_sizes[:, 0] = k_sel
                         
-                        k_mem = block_relativistic_rope(
+                        k_mem = causal_online_rope(
                             k_mem_unroped,
                             mem_grid_sizes, freqs, relative_frame_indices=torch.zeros(k_sel, dtype=torch.long, device=device)
                         ).type_as(v)
@@ -959,7 +959,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         """
         Applies cache updates collected from multiple blocks.
         
-        For Block-Relativistic RoPE, this stores UN-ROPED K values in the cache.
+        For causal online RoPE, this stores UN-ROPED K values in the cache.
         RoPE is applied dynamically during attention based on the token's current
         relative position in the sliding window.
         

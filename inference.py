@@ -27,6 +27,15 @@ args = parser.parse_args()
 
 config = OmegaConf.load(args.config_path)
 
+# === Cross-machine deterministic / reproducible inference ===
+# Must be set before the CUDA context is created (i.e. before any CUDA op,
+# such as the torch.cuda.set_device below).
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
+os.environ.setdefault("PYTHONHASHSEED", str(getattr(config, "seed", 0)))
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+torch.use_deterministic_algorithms(True, warn_only=True)
+
 # Initialize distributed inference
 if "LOCAL_RANK" in os.environ:
     os.environ["NCCL_CROSS_NIC"] = "1"
