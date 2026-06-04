@@ -121,6 +121,28 @@ bash inference.sh causal_forcing native
 GPU=4 PORT=29510 bash inference.sh causal_forcing latentmem
 ```
 
+### 🔁 Reproducibility
+
+For deterministic inference, [inference.py](inference.py) sets a fixed seed (`config.seed`) across `random` / `numpy` / `torch` and enables deterministic backends:
+
+```python
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
+os.environ.setdefault("PYTHONHASHSEED", str(config.seed))
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+torch.use_deterministic_algorithms(True, warn_only=True)
+```
+
+> ⚠️ **Bit-exact cross-machine reproduction is strict and hard to guarantee.** Even with the settings above, identical outputs across *different* machines require the **same GPU model**, the **same PyTorch / CUDA / cuDNN versions**, and matching checkpoints/configs. Differences in GPU architecture (e.g. A100 vs. H100), TF32 behavior, or the `torch.compile` autotuned attention kernels can still produce small numerical drift. To take `PYTHONHASHSEED` fully into effect, export it before launching: `PYTHONHASHSEED=0 bash inference.sh ...`.
+
+> ✅ **The more reliable way to validate our gains is a same-machine A/B comparison.** Run the **native** baseline and **LongLive-RAG (`latentmem`)** back-to-back on the *same* GPU with the *same* prompts and seed, then compare the outputs directly. This isolates the effect of retrieval from any hardware/software-stack variance:
+>
+> ```bash
+> # Same backbone, same machine — compare baseline vs. ours
+> bash inference.sh causal_forcing native
+> bash inference.sh causal_forcing latentmem
+> ```
+
 ### 🏋️ Training
 
 The base generator stays **frozen**; the only trainable component is the retrieval encoder (a small latent autoencoder). Training has two steps:
